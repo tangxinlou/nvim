@@ -7,6 +7,8 @@ vim.opt.showmode = true          -- 底部显示 INSERT/VISUAL(老 Vim 风格)
 vim.opt.laststatus = 2           -- 始终显示底部状态栏
 vim.opt.cmdheight = 2            -- 命令行高度 2 行(跟老 .vimrc 一致)
 vim.opt.ruler = true             -- 右下角行列号
+vim.opt.number = true            -- 显示行号
+vim.opt.relativenumber = false   -- 绝对行号(不要相对)
 vim.opt.virtualedit = "all"      -- 光标可以移动到行末之后任意位置(老 Vim 风格)
 vim.opt.cursorline = false
 vim.opt.cursorcolumn = true      -- 高亮光标所在列(竖线定位)
@@ -34,12 +36,15 @@ vim.api.nvim_create_autocmd("VimLeave", {
   callback = function() io.write("\27[2 q") end,
 })
 
--- 所有 vim.notify 消息同步写入 :messages 历史
+-- 所有 vim.notify 消息写入文件(方便事后查看)
+local log_file = vim.fn.expand("~/.config/nvim/notify.log")
 local orig_notify = vim.notify
 vim.notify = function(msg, level, opts)
-  pcall(function()
-    vim.api.nvim_echo({{ tostring(msg) }}, true, {})
-  end)
+  local f = io.open(log_file, "a")
+  if f then
+    f:write(os.date("%H:%M:%S") .. " | " .. tostring(msg) .. "\n")
+    f:close()
+  end
   if orig_notify then
     orig_notify(msg, level, opts)
   end
