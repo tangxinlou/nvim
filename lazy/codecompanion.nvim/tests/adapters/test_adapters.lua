@@ -1,0 +1,1035 @@
+local h = require("tests.helpers")
+
+local new_set = MiniTest.new_set
+
+local child = MiniTest.new_child_neovim()
+T = new_set({
+  hooks = {
+    pre_case = function()
+      h.child_start(child)
+      child.lua([[
+        h = require('tests.helpers')
+        utils = require("codecompanion.utils.adapters")
+
+        _G.test_acp_adapter = {
+          name = "test_acp",
+          formatted_name = "Test ACP",
+          type = "acp",
+          roles = {
+            llm = "assistant",
+            user = "user",
+          },
+          commands = {
+            default = { "node", "test-agent.js" },
+            yolo = { "node", "test-agent.js", "--yolo" },
+          },
+          defaults = {
+            mcpServers = {},
+            timeout = 10000,
+          },
+          parameters = {
+            protocolVersion = 1,
+          },
+          handlers = {
+            setup = function(self)
+              return true
+            end,
+            form_messages = function(self, messages, capabilities)
+              return messages
+            end,
+          },
+        }
+
+        _G.test_adapter = {
+          name = "TestAdapter",
+          url = "https://api.testgenai.com/v1/chat/completions",
+          headers = {
+            content_type = "application/json",
+          },
+          parameters = {
+            stream = true,
+          },
+          schema = {
+            model = {
+              order = 1,
+              mapping = "parameters.data",
+              type = "enum",
+              desc = "ID of the model to use. See the model endpoint compatibility table for details on which models work with the Chat API.",
+              default = "gpt-4-0125-preview",
+              choices = {
+                "gpt-4-1106-preview",
+                "gpt-4",
+                "gpt-3.5-turbo-1106",
+                "gpt-3.5-turbo",
+              },
+            },
+            temperature = {
+              order = 2,
+              mapping = "parameters.options",
+              type = "number",
+              optional = true,
+              default = 1,
+              desc = "What sampling temperature to use, between 0 and 2. Higher values like 0.8 will make the output more random, while lower values like 0.2 will make it more focused and deterministic. We generally recommend altering this or top_p but not both.",
+              validate = function(n)
+                return n >= 0 and n <= 2, "Must be between 0 and 2"
+              end,
+            },
+            top_p = {
+              order = 3,
+              mapping = "parameters.options",
+              type = "number",
+              optional = true,
+              default = 1,
+              desc = "An alternative to sampling with temperature, called nucleus sampling, where the model considers the results of the tokens with top_p probability mass. So 0.1 means only the tokens comprising the top 10% probability mass are considered. We generally recommend altering this or temperature but not both.",
+              validate = function(n)
+                return n >= 0 and n <= 1, "Must be between 0 and 1"
+              end,
+            },
+          },
+        }
+
+        _G.chat_buffer_settings = {
+          frequency_penalty = 0,
+          model = "gpt-4-0125-preview",
+          presence_penalty = 0,
+          temperature = 1,
+          top_p = 1,
+          stop = nil,
+          max_tokens = nil,
+          logit_bias = nil,
+          user = nil,
+        }
+
+        _G.test_adapter2 = {
+          name = "TestAdapter2",
+          url = "https://api.oli.ai/v1/chat/${model}",
+          env = {
+            home = "HOME",
+            model = "schema.model.default",
+          },
+          parameters = {
+            stream = true,
+          },
+          headers = {
+            content_type = "application/json",
+            home = "${home}",
+          },
+          schema = {
+            model = {
+              order = 1,
+              type = "enum",
+              desc = "ID of the model to use. See the model endpoint compatibility table for details on which models work with the Chat API.",
+              default = "oli_model_v2",
+            },
+            temperature = {
+              default = "${home}",
+              mapping = "parameters.temperature",
+            },
+          },
+        }
+      ]])
+    end,
+    post_case = child.stop,
+  },
+})
+
+T["Adapter"] = new_set()
+
+--=============================================================================
+-- HTTP Adapter Tests
+--=============================================================================
+
+T["HTTP Adapter"] = new_set()
+
+T["HTTP Adapter"]["can form parameters from a chat buffer's settings"] = function()
+  local result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend("openai")
+    local result = adapter:map_schema_to_params(_G.chat_buffer_settings)
+
+    -- Ignore these for now
+    result.parameters.stream = nil
+    result.parameters.stream_options = nil
+
+    return result.parameters
+  ]])
+
+  h.eq(child.lua_get([[_G.chat_buffer_settings]]), result)
+end
+
+T["HTTP Adapter"]["can use schema to created nested parameters"] = function()
+  local result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend("openai", {
+      schema = {
+        ["reasoning.effort"] = {
+          order = 2,
+          mapping = "parameters",
+          type = "string",
+          optional = true,
+          default = "medium",
+          desc = "Constrains effort on reasoning for reasoning models. Reducing reasoning effort can result in faster responses and fewer tokens used on reasoning in a response.",
+          choices = {
+            "high",
+            "medium",
+            "low",
+            "minimal",
+          }
+        }
+      }
+    })
+    return adapter:map_schema_to_params().parameters
+  ]])
+
+  local expected = {
+    effort = "medium",
+  }
+
+  h.eq(expected, result.reasoning)
+end
+
+T["HTTP Adapter"]["can nest parameters based on an adapter's schema"] = function()
+  local result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend(_G.test_adapter)
+    return adapter:map_schema_to_params(_G.chat_buffer_settings).parameters
+  ]])
+
+  local expected = {
+    stream = true,
+    data = {
+      model = "gpt-4-0125-preview",
+    },
+    options = {
+      temperature = 1,
+      top_p = 1,
+    },
+  }
+
+  h.eq(expected, result)
+end
+
+T["HTTP Adapter"]["can form environment variables"] = function()
+  local result = child.lua([[
+    local utils = require("codecompanion.utils.adapters")
+    local adapter = require("codecompanion.adapters").extend(test_adapter2)
+    return utils.get_env_vars(adapter)
+  ]])
+
+  h.eq(child.lua_get([[_G.test_adapter2.schema.model.default]]), result.env_replaced.model)
+  h.eq(os.getenv("HOME"), result.env_replaced.home)
+end
+
+T["HTTP Adapter"]["can set environment variables in the adapter"] = function()
+  local result = child.lua([[
+    local utils = require("codecompanion.utils.adapters")
+    adapter = require("codecompanion.adapters").extend(_G.test_adapter2)
+    utils.get_env_vars(adapter)
+
+    return utils.set_env_vars(adapter, adapter.url)
+  ]])
+
+  h.eq("https://api.oli.ai/v1/chat/oli_model_v2", result)
+
+  local headers = child.lua([[
+    return utils.set_env_vars(adapter, adapter.headers)
+  ]])
+
+  h.eq({
+    content_type = "application/json",
+    home = os.getenv("HOME"),
+  }, headers)
+end
+
+T["HTTP Adapter"]["will not set environment variables if it doesn't need to"] = function()
+  local params = child.lua([[
+    local utils = require("codecompanion.utils.adapters")
+    local adapter = require("codecompanion.adapters").extend(test_adapter2)
+    utils.get_env_vars(adapter)
+    return utils.set_env_vars(adapter, adapter.parameters)
+  ]])
+
+  h.eq(child.lua_get([[_G.test_adapter2.parameters]]), params)
+end
+
+T["HTTP Adapter"]["environment variables can be functions"] = function()
+  local result = child.lua([[
+    local utils = require("codecompanion.utils.adapters")
+    local adapter = require("codecompanion.adapters").extend("openai", {
+      env = {
+        api_key = function()
+          return "test_api_key"
+        end,
+      }
+    })
+    return utils.get_env_vars(adapter).env_replaced.api_key
+  ]])
+
+  h.eq("test_api_key", result)
+end
+
+T["HTTP Adapter"]["can update a model on the adapter"] = function()
+  local result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend(test_adapter)
+    return adapter.resolve(adapter).model
+  ]])
+
+  h.eq({ name = "gpt-4-0125-preview", vendor = "TestAdapter" }, result)
+
+  result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend("openai", {
+      schema = {
+        model = {
+          default = "o4-mini-2025-04-16",
+          choices = {
+            ["o4-mini-2025-04-16"] = { opts = { can_reason = true } },
+            ["o3-mini-2025-01-31"] = { opts = { can_reason = true } },
+            ["o3-2025-04-16"] = { opts = { can_reason = true } },
+            ["o1-2024-12-17"] = { opts = { can_reason = true } },
+          }
+        }
+      }
+    })
+    return adapter.resolve(adapter).model
+  ]])
+
+  h.eq({
+    formatted_name = "o4 Mini",
+    name = "o4-mini-2025-04-16",
+    opts = {
+      can_reason = true,
+      has_vision = true,
+    },
+    vendor = "openai",
+  }, result)
+end
+
+T["HTTP Adapter"]["can update schema"] = function()
+  local adapter = require("codecompanion.adapters").extend("openai", {
+    schema = {
+      model = {
+        default = "my-new-adapter",
+        choices = {
+          "my-new-adapter",
+          "my-other-adapter",
+        },
+      },
+    },
+  })
+
+  h.eq("my-new-adapter", adapter.schema.model.default)
+  h.eq("my-new-adapter", adapter.schema.model.choices[1])
+end
+
+T["HTTP Adapter"]["can resolve custom adapters"] = function()
+  local result = child.lua([[
+    require("codecompanion").setup({
+      adapters = {
+        http = {
+          openai = function()
+            return require("codecompanion.adapters").extend("openai", {
+              env = {
+                api_key = "abc_123"
+              }
+            })
+          end,
+        }
+      },
+      interactions = {
+        chat = {
+          adapter = "openai",
+        }
+      }
+    })
+
+    return require("codecompanion.adapters").resolve().env.api_key
+  ]])
+
+  h.eq("abc_123", result)
+end
+
+T["HTTP Adapter"]["can pass in the name of the model"] = function()
+  local result = child.lua([[
+    h.setup_plugin({
+      interactions = {
+        chat = {
+          adapter = {
+            name = "copilot",
+            model = "some_made_up_model"
+          }
+        }
+      }
+    })
+    return require("codecompanion.adapters").resolve().model.name
+  ]])
+
+  h.eq("some_made_up_model", result)
+end
+
+T["HTTP Adapter"]["can extend an adapter"] = function()
+  local result = child.lua([[
+    return require("codecompanion.adapters").extend("openai", {
+      env = {
+        api_key = "test_api_key",
+      }
+    }).env.api_key
+  ]])
+
+  h.eq("test_api_key", result)
+end
+
+--=============================================================================
+-- ACP Adapter Tests
+--=============================================================================
+
+T["ACP Adapter"] = new_set()
+
+T["ACP Adapter"]["can extend an adapter"] = function()
+  local result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend(_G.test_acp_adapter)
+    return {
+      name = adapter.name,
+      type = adapter.type,
+      formatted_name = adapter.formatted_name,
+    }
+  ]])
+
+  h.eq("test_acp", result.name)
+  h.eq("acp", result.type)
+  h.eq("Test ACP", result.formatted_name)
+end
+
+T["ACP Adapter"]["can extend with defaults.model"] = function()
+  local result = child.lua([[
+    local adapter = require("codecompanion.adapters").extend(_G.test_acp_adapter, {
+      defaults = {
+        model = "sonnet"
+      }
+    })
+    return {
+      name = adapter.name,
+      type = adapter.type,
+      default_model = adapter.defaults.model,
+    }
+  ]])
+
+  h.eq("test_acp", result.name)
+  h.eq("acp", result.type)
+  h.eq("sonnet", result.default_model)
+end
+
+T["ACP Adapter"]["model in opts gets merged into defaults"] = function()
+  local result = child.lua([[
+    -- This tests the internal flow when { name, model } is resolved
+    local acp_adapter = require("codecompanion.adapters.acp")
+    local adapter = acp_adapter.resolve(_G.test_acp_adapter, { model = "haiku" })
+    return {
+      name = adapter.name,
+      default_model = adapter.defaults and adapter.defaults.model,
+    }
+  ]])
+
+  h.eq("test_acp", result.name)
+  h.eq("haiku", result.default_model)
+end
+
+T["ACP Adapter"]["preserves other defaults when setting model"] = function()
+  local result = child.lua([[
+    local acp_adapter = require("codecompanion.adapters.acp")
+    local adapter = acp_adapter.resolve(_G.test_acp_adapter, { model = "opus" })
+    return {
+      model = adapter.defaults.model,
+      -- Check that other defaults are preserved
+      has_timeout = adapter.defaults.timeout ~= nil,
+      has_mcp_servers = adapter.defaults.mcpServers ~= nil,
+    }
+  ]])
+
+  h.eq("opus", result.model)
+  h.eq(true, result.has_timeout)
+  h.eq(true, result.has_mcp_servers)
+end
+
+T["ACP Adapter"]["can be checked if resolved"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+    local acp_adapter = require("codecompanion.adapters.acp")
+
+    local unresolved = { name = "test_acp" }
+    local resolved = acp_adapter.extend(_G.test_acp_adapter)
+
+    return {
+      unresolved_check = acp_adapter.resolved(unresolved),
+      resolved_check = acp_adapter.resolved(resolved),
+    }
+  ]])
+
+  h.eq(false, result.unresolved_check)
+  h.eq(true, result.resolved_check)
+end
+
+T["ACP Adapter"]["make_safe returns expected fields"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+    local adapter = adapters.extend(_G.test_acp_adapter)
+    local safe = adapters.make_safe(adapter)
+
+    return {
+      has_name = safe.name ~= nil,
+      has_formatted_name = safe.formatted_name ~= nil,
+      has_type = safe.type ~= nil,
+      has_defaults = safe.defaults ~= nil,
+      type_value = safe.type,
+    }
+  ]])
+
+  h.eq(true, result.has_name)
+  h.eq(true, result.has_formatted_name)
+  h.eq(true, result.has_type)
+  h.eq(true, result.has_defaults)
+  h.eq("acp", result.type_value)
+end
+
+T["ACP Adapter"]["can configure custom adapter with default model function"] = function()
+  local result = child.lua([[
+    local acp_adapter = require("codecompanion.adapters.acp")
+
+    -- Create an adapter with a function for default model
+    local custom_adapter = vim.tbl_deep_extend("force", _G.test_acp_adapter, {
+      defaults = {
+        model = function(adapter)
+          return "dynamic_" .. adapter.name
+        end,
+      },
+    })
+
+    local adapter = acp_adapter.extend(custom_adapter)
+    return {
+      name = adapter.name,
+      type = adapter.type,
+      -- The function is stored, not evaluated at extend time
+      has_model_function = type(adapter.defaults.model) == "function",
+    }
+  ]])
+
+  h.eq("test_acp", result.name)
+  h.eq("acp", result.type)
+  h.eq(true, result.has_model_function)
+end
+
+--=============================================================================
+-- General Adapter Utils Tests
+--=============================================================================
+
+T["Adapter"]["utils"] = new_set()
+
+T["Adapter"]["utils"]["can consolidate consecutive messages"] = function()
+  child.lua([[
+    messages = {
+      { role = "system", content = "This is a system prompt" },
+      { role = "user", content = "Foo" },
+      { role = "user", content = "Bar" },
+    }
+  ]])
+
+  h.eq({
+    { role = "system", content = "This is a system prompt" },
+    { role = "user", content = "Foo\n\nBar" },
+  }, child.lua_get([[utils.merge_messages(messages)]]))
+end
+
+T["Adapter"]["utils"]["can smartly merge tables together"] = function()
+  child.lua([[
+    messages = {
+      {
+        role = "user",
+        content = {
+          content = "Foo",
+          tool_id = "123",
+        },
+      },
+      {
+        role = "user",
+        content = {
+          content = "Bar",
+          tool_id = "456",
+        },
+      },
+      {
+        role = "assistant",
+        content = "Foobar ftw!",
+      },
+    }
+  ]])
+
+  h.eq({
+    {
+      content = {
+        {
+          content = "Foo",
+          tool_id = "123",
+        },
+        {
+          content = "Bar",
+          tool_id = "456",
+        },
+      },
+      role = "user",
+    },
+    {
+      content = "Foobar ftw!",
+      role = "assistant",
+    },
+  }, child.lua_get([[utils.merge_messages(messages)]]))
+end
+
+T["Adapter"]["utils"]["add_header sets header when absent"] = function()
+  local result = child.lua([[
+    local headers = {}
+    utils.add_header(headers, "x-custom", "value-a")
+    return headers
+  ]])
+
+  h.eq({ ["x-custom"] = "value-a" }, result)
+end
+
+T["Adapter"]["utils"]["add_header appends without duplicating"] = function()
+  local result = child.lua([[
+    local headers = { ["anthropic-beta"] = "token-efficient-tools-2025-02-19" }
+    utils.add_header(headers, "anthropic-beta", "output-128k-2025-02-19")
+    utils.add_header(headers, "anthropic-beta", "token-efficient-tools-2025-02-19")
+    return headers["anthropic-beta"]
+  ]])
+
+  h.eq("token-efficient-tools-2025-02-19,output-128k-2025-02-19", result)
+end
+
+T["Adapter"]["utils"]["add_header handles multiple values"] = function()
+  local result = child.lua([[
+    local headers = {}
+    utils.add_header(headers, "anthropic-beta", "a")
+    utils.add_header(headers, "anthropic-beta", "b")
+    utils.add_header(headers, "anthropic-beta", "c")
+    utils.add_header(headers, "anthropic-beta", "b")
+    return headers["anthropic-beta"]
+  ]])
+
+  h.eq("a,b,c", result)
+end
+
+T["Adapter"]["utils"]["remove_header removes a value from a comma-separated header"] = function()
+  local result = child.lua([[
+    local headers = { ["anthropic-beta"] = "token-efficient-tools-2025-02-19,compact-2026-01-12" }
+    utils.remove_header(headers, "anthropic-beta", "compact-2026-01-12")
+    return headers["anthropic-beta"]
+  ]])
+
+  h.eq("token-efficient-tools-2025-02-19", result)
+end
+
+T["Adapter"]["utils"]["remove_header removes key when last value is removed"] = function()
+  local result = child.lua([[
+    local headers = { ["anthropic-beta"] = "compact-2026-01-12" }
+    utils.remove_header(headers, "anthropic-beta", "compact-2026-01-12")
+    return headers["anthropic-beta"]
+  ]])
+
+  h.eq(vim.NIL, result)
+end
+
+T["Adapter"]["utils"]["remove_header is a no-op when key is absent"] = function()
+  local result = child.lua([[
+    local headers = {}
+    utils.remove_header(headers, "anthropic-beta", "compact-2026-01-12")
+    return headers["anthropic-beta"]
+  ]])
+
+  h.eq(vim.NIL, result)
+end
+
+T["Adapter"]["utils"]["remove_header is a no-op when value is not present"] = function()
+  local result = child.lua([[
+    local headers = { ["anthropic-beta"] = "token-efficient-tools-2025-02-19" }
+    utils.remove_header(headers, "anthropic-beta", "compact-2026-01-12")
+    return headers["anthropic-beta"]
+  ]])
+
+  h.eq("token-efficient-tools-2025-02-19", result)
+end
+
+T["Adapter"]["utils"]["can consolidate system messages"] = function()
+  child.lua([[
+    messages = {
+      { role = "system", content = "This is a system prompt" },
+      { role = "user", content = "Foo" },
+      { role = "assistant", content = "Bar" },
+      { role = "system", content = "This is ANOTHER system prompt" },
+      { role = "user", content = "Baz" },
+    }
+  ]])
+
+  h.eq({
+    { role = "system", content = "This is a system prompt This is ANOTHER system prompt" },
+    { role = "user", content = "Foo" },
+    { role = "assistant", content = "Bar" },
+    { role = "user", content = "Baz" },
+  }, child.lua_get([[utils.merge_system_messages(messages)]]))
+end
+
+T["Adapter"]["call_handler"] = new_set()
+
+T["Adapter"]["call_handler"]["works with nested handlers"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    -- Create an adapter with nested handlers
+    local adapter = {
+      name = "test",
+      type = "http",
+      handlers = {
+        request = {
+          build_messages = function(self, messages)
+            return { processed = true, messages = messages }
+          end,
+          build_parameters = function(self, params, messages)
+            return { processed_params = params }
+          end
+        },
+        response = {
+          parse_chat = function(self, data, tools)
+            return { status = "success", output = { content = data } }
+          end,
+          parse_tokens = function(self, data)
+            return 42
+          end
+        }
+      }
+    }
+
+    return {
+      messages = adapters.call_handler(adapter, "build_messages", { "hello" }),
+      parameters = adapters.call_handler(adapter, "build_parameters", { temp = 1 }, {}),
+      chat = adapters.call_handler(adapter, "parse_chat", "test data", {}),
+      tokens = adapters.call_handler(adapter, "parse_tokens", {})
+    }
+  ]])
+
+  h.eq({ processed = true, messages = { "hello" } }, result.messages)
+  h.eq({ processed_params = { temp = 1 } }, result.parameters)
+  h.eq({ status = "success", output = { content = "test data" } }, result.chat)
+  h.eq(42, result.tokens)
+end
+
+T["Adapter"]["call_handler"]["works with old flat handler structure"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    -- Create an adapter with old flat handler structure
+    local adapter = {
+      name = "test",
+      type = "http",
+      handlers = {
+        form_messages = function(self, messages)
+          return { old_format = true, messages = messages }
+        end,
+        form_parameters = function(self, params, messages)
+          return { old_params = params }
+        end,
+        chat_output = function(self, data, tools)
+          return { status = "success", output = { content = data } }
+        end,
+        tokens = function(self, data)
+          return 100
+        end
+      }
+    }
+
+    -- Call using new names, should map to old names via compatibility layer
+    return {
+      messages = adapters.call_handler(adapter, "build_messages", { "world" }),
+      parameters = adapters.call_handler(adapter, "build_parameters", { temp = 2 }, {}),
+      chat = adapters.call_handler(adapter, "parse_chat", "old data", {}),
+      tokens = adapters.call_handler(adapter, "parse_tokens", {})
+    }
+  ]])
+
+  h.eq({ old_format = true, messages = { "world" } }, result.messages)
+  h.eq({ old_params = { temp = 2 } }, result.parameters)
+  h.eq({ status = "success", output = { content = "old data" } }, result.chat)
+  h.eq(100, result.tokens)
+end
+
+T["Adapter"]["call_handler"]["returns nil for missing handlers"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    local adapter = {
+      name = "test",
+      type = "http",
+      handlers = {}
+    }
+
+    return {
+      missing = adapters.call_handler(adapter, "non_existent_handler", "data"),
+      also_missing = adapters.call_handler(adapter, "another_missing", "more data")
+    }
+  ]])
+
+  h.eq(nil, result.missing)
+  h.eq(nil, result.also_missing)
+end
+
+T["Adapter"]["call_handler"]["passes adapter as first argument"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    local adapter = {
+      name = "test_adapter",
+      custom_field = "test_value",
+      type = "http",
+      handlers = {
+        lifecycle = {
+          setup = function(self)
+            return {
+              name = self.name,
+              custom = self.custom_field
+            }
+          end
+        }
+      }
+    }
+
+    return adapters.call_handler(adapter, "setup")
+  ]])
+
+  h.eq({
+    name = "test_adapter",
+    custom = "test_value",
+  }, result)
+end
+
+T["Adapter"]["call_handler"]["works with lifecycle handlers"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    local adapter = {
+      name = "test",
+      type = "http",
+      handlers = {
+        lifecycle = {
+          setup = function(self)
+            return true
+          end,
+          on_exit = function(self, data)
+            return "cleaned_up_" .. data.status
+          end,
+          teardown = function(self)
+            return "torn_down"
+          end
+        }
+      }
+    }
+
+    return {
+      setup = adapters.call_handler(adapter, "setup"),
+      on_exit = adapters.call_handler(adapter, "on_exit", { status = 200 }),
+      teardown = adapters.call_handler(adapter, "teardown")
+    }
+  ]])
+
+  h.eq(true, result.setup)
+  h.eq("cleaned_up_200", result.on_exit)
+  h.eq("torn_down", result.teardown)
+end
+
+T["Adapter"]["call_handler"]["works with tool handlers"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    local adapter = {
+      name = "test",
+      type = "http",
+      roles = { tool = "tool" },
+      handlers = {
+        -- Add a lifecycle handler to make it clear this is new format
+        lifecycle = {},
+        tools = {
+          format_calls = function(self, tools)
+            return { formatted = true, tools = tools }
+          end,
+          format_response = function(self, tool_call, output)
+            return {
+              role = self.roles.tool,
+              content = output,
+              tool_call_id = tool_call.id
+            }
+          end
+        }
+      }
+    }
+
+    return {
+      format = adapters.call_handler(adapter, "format_calls", { { name = "test_tool" } }),
+      response = adapters.call_handler(adapter, "format_response", { id = "call_123" }, "tool output")
+    }
+  ]])
+
+  h.eq({
+    formatted = true,
+    tools = { { name = "test_tool" } },
+  }, result.format)
+
+  h.eq({
+    role = "tool",
+    content = "tool output",
+    tool_call_id = "call_123",
+  }, result.response)
+end
+
+T["Adapter"]["call_handler"]["works with tools in old flat format"] = function()
+  -- This test is is unneccesasry but checking there's no weird edge cases
+
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    -- Real old flat format - has tools namespace but no lifecycle/request/response
+    local adapter = {
+      name = "test",
+      type = "http",
+      roles = { tool = "tool" },
+      handlers = {
+        -- Flat handlers (old format indicators)
+        form_messages = function(self, messages)
+          return { messages = messages }
+        end,
+        chat_output = function(self, data, tools)
+          return { status = "success", output = { content = data } }
+        end,
+        -- Tools in namespace (but still old format because no lifecycle/request/response)
+        tools = {
+          format_tool_calls = function(self, tools)
+            return { old_format = true, tools = tools }
+          end,
+          output_response = function(self, tool_call, output)
+            return {
+              role = self.roles.tool,
+              content = "old:" .. output
+            }
+          end
+        }
+      }
+    }
+
+    return {
+      format = adapters.call_handler(adapter, "format_calls", { { name = "old_tool" } }),
+      response = adapters.call_handler(adapter, "format_response", { id = "123" }, "data")
+    }
+  ]])
+
+  h.eq({
+    old_format = true,
+    tools = { { name = "old_tool" } },
+  }, result.format)
+
+  h.eq({
+    role = "tool",
+    content = "old:data",
+  }, result.response)
+end
+
+T["Adapter"]["call_handler"]["handles multiple arguments correctly"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    local adapter = {
+      name = "test",
+      type = "http",
+      handlers = {
+        request = {
+          build_parameters = function(self, params, messages)
+            return {
+              adapter_name = self.name,
+              params_count = #params,
+              messages_count = #messages
+            }
+          end
+        }
+      }
+    }
+
+    return adapters.call_handler(
+      adapter,
+      "build_parameters",
+      { "p1", "p2", "p3" },
+      { "m1", "m2" }
+    )
+  ]])
+
+  h.eq({
+    adapter_name = "test",
+    params_count = 3,
+    messages_count = 2,
+  }, result)
+end
+
+T["Adapter"]["model_choice"] = new_set()
+
+T["Adapter"]["model_choice"]["returns nil when choices is a function"] = function()
+  local result = child.lua([[
+    local adapter = {
+      schema = {
+        model = {
+          default = "gpt-5.4-mini",
+          choices = function(self, opts)
+            return {}
+          end,
+        },
+      },
+    }
+
+    return utils.model_choice(adapter)
+  ]])
+
+  h.eq(vim.NIL, result)
+end
+
+T["Adapter"]["model_choice"]["returns model opts when choices is a table"] = function()
+  local result = child.lua([[
+    local adapter = {
+      schema = {
+        model = {
+          default = "gpt-4o",
+          choices = {
+            ["gpt-4o"] = { opts = { can_reason = false } },
+            ["o1"] = { opts = { can_reason = true } },
+          },
+        },
+      },
+    }
+
+    return utils.model_choice(adapter)
+  ]])
+
+  h.eq({ opts = { can_reason = false } }, result)
+end
+
+T["Adapter"]["call_handler"]["works without arguments"] = function()
+  local result = child.lua([[
+    local adapters = require("codecompanion.adapters")
+
+    local adapter = {
+      name = "test",
+      type = "http",
+      handlers = {
+        lifecycle = {
+          teardown = function(self)
+            return "cleaned"
+          end
+        }
+      }
+    }
+
+    return adapters.call_handler(adapter, "teardown")
+  ]])
+
+  h.eq("cleaned", result)
+end
+
+return T

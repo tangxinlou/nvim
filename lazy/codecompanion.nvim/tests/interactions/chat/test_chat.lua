@@ -1,0 +1,770 @@
+local h = require("tests.helpers")
+local tags = require("codecompanion.interactions.shared.tags")
+
+local expect = MiniTest.expect
+local new_set = MiniTest.new_set
+local T = new_set()
+
+local child = MiniTest.new_child_neovim()
+T = new_set({
+  hooks = {
+    pre_case = function()
+      h.child_start(child)
+      child.lua([[
+        codecompanion = require("codecompanion")
+        h = require('tests.helpers')
+        _G.chat, _G.tools = h.setup_chat_buffer()
+      ]])
+    end,
+    post_case = function()
+      child.lua([[h.teardown_chat_buffer()]])
+    end,
+    post_once = child.stop,
+  },
+})
+
+T["Chat"] = new_set()
+
+T["Chat"]["system prompt is added first"] = function()
+  local messages = child.lua_get([[_G.chat.messages]])
+  h.eq("system", messages[1].role)
+  h.eq("default system prompt", messages[1].content)
+end
+
+T["Chat"]["buffer editor context is handled"] = function()
+  -- Execute all the complex operations in the child process
+  child.lua([[
+    -- Get the existing chat object
+    local chat = _G.chat
+
+    -- Add a new message with editor_context
+    table.insert(chat.messages, { role = "user", content = "#{foo} what does this file do?" })
+
+    -- Get the message we just added
+    local message = chat.messages[#chat.messages]
+
+    -- Parse and replace editor context in the message
+    if chat.editor_context:parse(chat, message) then
+      message.content = chat.editor_context:replace(message.content, chat.buffer_context.bufnr)
+    end
+
+    -- Extract the properties we need to test into simple data types
+    _G.last_message_content = chat.messages[#chat.messages].content
+    _G.last_message_visible = chat.messages[#chat.messages].opts.visible
+    _G.last_message_tag = chat.messages[#chat.messages]._meta.tag
+  ]])
+
+  -- Retrieve the simple values from the child process
+  local last_message_content = child.lua_get([[_G.last_message_content]])
+  local last_message_visible = child.lua_get([[_G.last_message_visible]])
+  local last_message_tag = child.lua_get([[_G.last_message_tag]])
+
+  -- Make assertions on the retrieved values
+  h.eq("foo", last_message_content)
+  h.eq(false, last_message_visible)
+  h.eq(tags.EDITOR_CONTEXT, last_message_tag)
+end
+
+T["Chat"]["system prompt can be ignored"] = function()
+  child.lua([[_G.new_chat = require("codecompanion.interactions.chat").new({
+    ignore_system_prompt = true,
+  })]])
+
+  local new_chat = child.lua_get([[_G.new_chat.messages]])
+
+  h.eq(nil, new_chat[1])
+end
+
+T["Chat"]["chat buffer is initialized"] = function()
+  child.lua([[require("codecompanion").chat()]])
+  expect.reference_screenshot(child.get_screenshot())
+end
+
+T["Chat"]["cursor is placed after last character when prompt library has non-empty user prompt"] = function()
+  local child_test = MiniTest.new_child_neovim()
+  h.child_start(child_test)
+
+  local result = child_test.lua([[
+    h = require('tests.helpers')
+    codecompanion = h.setup_plugin()
+    codecompanion.setup({
+      prompt_library = {
+        ["Test Cursor"] = {
+          strategy = "chat",
+          description = "Test cursor position",
+          opts = {
+            alias = "test_cursor",
+            auto_submit = false,
+          },
+          prompts = {
+            {
+              role = "user",
+              content = "Test",
+            },
+          },
+        },
+      },
+    })
+    codecompanion.prompt("test_cursor")
+    local bufnr = vim.api.nvim_get_current_buf()
+    -- Get the last line of the buffer
+    local line_count = vim.api.nvim_buf_line_count(bufnr)
+    local last_line = vim.api.nvim_buf_get_lines(bufnr, line_count - 1, line_count, false)[1]
+    -- Get cursor position
+    local cursor = vim.api.nvim_win_get_cursor(0)
+    return {
+      last_line = last_line,
+      cursor_row = cursor[1],
+      cursor_col = cursor[2],
+      line_count = line_count,
+    }
+  ]])
+
+  child_test.stop()
+
+  -- The last line should be empty (buffer ends with a blank line)
+  h.eq("", result.last_line)
+  -- The cursor should be on the last line
+  h.eq(result.line_count, result.cursor_row)
+  -- The cursor column should be 0 (start of empty line)
+  h.eq(0, result.cursor_col)
+end
+
+T["Chat"]["loading from the prompt library sets the correct header_line"] = function()
+  local output = child.lua([[
+    --require("tests.log")
+    -- Load the demo prompt from the prompt library
+    codecompanion.prompt("demo")
+    -- Get the chat object
+    local bufnr = vim.api.nvim_get_current_buf()
+    local chat = codecompanion.buf_get_chat(bufnr)
+    return chat.header_line
+  ]])
+
+  expect.reference_screenshot(child.get_screenshot())
+  h.eq(9, output)
+end
+
+T["Chat"]["prompt decorator is applied prior to sending to the LLM"] = function()
+  local prompt = "Testing out the prompt decorator"
+  local output = child.lua(string.format(
+    [[
+      local config = require("codecompanion.config")
+      config.interactions.chat.opts.prompt_decorator = function(message)
+        return "<prompt>" .. message .. "</prompt>"
+      end
+      _G.chat:add_buf_message({
+        role = "user",
+        content = "%s",
+      })
+      _G.chat:submit()
+      return _G.chat.messages[#_G.chat.messages].content
+  ]],
+    prompt
+  ))
+
+  h.eq("<prompt>" .. prompt .. "</prompt>", output)
+end
+
+T["Chat"]["CodeCompanion images are replaced in text and base64 encoded"] = function()
+  local prompt =
+    string.format("What does this [Image](%s) do?", vim.fs.normalize(vim.fn.getcwd()) .. "/tests/stubs/logo.png")
+  local message = child.lua(string.format(
+    [[
+      _G.chat:add_buf_message({
+        role = "user",
+        content = "%s",
+      })
+      _G.chat:submit()
+      local messages = _G.chat.messages
+      return messages[#messages].content
+  ]],
+    prompt
+  ))
+
+  h.eq("What does this image do?", message)
+
+  message = child.lua([[
+    local messages = _G.chat.messages
+    return messages[#messages - 1]
+  ]])
+
+  h.eq({
+    visible = false,
+  }, message.opts)
+
+  h.eq({
+    cycle = 1,
+    estimated_tokens = message._meta.estimated_tokens,
+    index = message._meta.index,
+    id = message._meta.id,
+    tag = tags.IMAGE,
+  }, message._meta)
+
+  h.eq({
+    id = string.format("<image>%s/tests/stubs/logo.png</image>", vim.fs.normalize(vim.fn.getcwd())),
+    mimetype = "image/png",
+    path = string.format("%s/tests/stubs/logo.png", vim.fs.normalize(vim.fn.getcwd())),
+  }, message.context)
+
+  h.expect_starts_with("iVBORw0KGgoAAAANSUhEU", message.content)
+end
+
+T["Chat"]["markdown images are replaced in text and base64 encoded"] = function()
+  local prompt =
+    string.format("What does this ![logo](%s) do?", vim.fs.normalize(vim.fn.getcwd()) .. "/tests/stubs/logo.png")
+  local message = child.lua(string.format(
+    [[
+      _G.chat:add_buf_message({
+        role = "user",
+        content = "%s",
+      })
+      _G.chat:submit()
+      local messages = _G.chat.messages
+      return messages[#messages].content
+  ]],
+    prompt
+  ))
+
+  h.eq("What does this image do?", message)
+
+  message = child.lua([[
+    local messages = _G.chat.messages
+    return messages[#messages - 1]
+  ]])
+
+  h.eq({
+    visible = false,
+  }, message.opts)
+
+  h.eq({
+    cycle = 1,
+    estimated_tokens = message._meta.estimated_tokens,
+    index = message._meta.index,
+    id = message._meta.id,
+    tag = tags.IMAGE,
+  }, message._meta)
+
+  h.eq({
+    id = string.format("<image>%s/tests/stubs/logo.png</image>", vim.fs.normalize(vim.fn.getcwd())),
+    mimetype = "image/png",
+    path = string.format("%s/tests/stubs/logo.png", vim.fs.normalize(vim.fn.getcwd())),
+  }, message.context)
+
+  h.expect_starts_with("iVBORw0KGgoAAAANSUhEU", message.content)
+end
+
+T["Chat"]["ordinary markdown links are not treated as images"] = function()
+  local prompt =
+    string.format("What does this [file](%s) do?", vim.fs.normalize(vim.fn.getcwd()) .. "/tests/stubs/logo.png")
+  local result = child.lua(string.format(
+    [[
+      _G.chat:add_buf_message({
+        role = "user",
+        content = "%s",
+      })
+      _G.chat:submit()
+      local messages = _G.chat.messages
+      return {
+        content = messages[#messages].content,
+        tag = messages[#messages]._meta and messages[#messages]._meta.tag,
+        context_items = vim.tbl_count(_G.chat.context_items),
+      }
+  ]],
+    prompt
+  ))
+
+  h.eq(prompt, result.content)
+  h.eq(nil, result.tag)
+  h.eq(0, result.context_items)
+end
+
+local get_lines = function()
+  return child.api.nvim_buf_get_lines(0, 0, -1, true)
+end
+
+T["Chat"]["can bring up keymap options in the chat buffer"] = function()
+  child.lua([[
+    require("codecompanion").chat()
+    vim.cmd("stopinsert") -- Ensure we're in normal mode
+  ]])
+
+  child.type_keys("?")
+  vim.loop.sleep(200)
+
+  h.eq(get_lines()[1], "### Keymaps")
+end
+
+T["Chat"]["can load default tools"] = function()
+  local ctx = child.lua([[
+    codecompanion = require("codecompanion")
+    h = require('tests.helpers')
+
+    _G.chat, _G.tools = h.setup_chat_buffer({
+      interactions = {
+        chat = {
+          tools = {
+            opts = {
+              default_tools = { "weather", "tool_group" }
+            }
+          }
+        }
+      }
+    })
+
+    return _G.chat.context_items
+  ]])
+  h.eq(
+    { "<tool>weather</tool>", "<group>tool_group</group>", "<tool>func</tool>", "<tool>cmd</tool>" },
+    vim
+      .iter(ctx)
+      :map(function(item)
+        return item.id
+      end)
+      :totable()
+  )
+end
+
+T["Chat"]["ftplugin window options override plugin defaults"] = function()
+  -- This test verifies that user's after/ftplugin/codecompanion.lua can override
+  -- the plugin's default window options. This ensures setting filetype
+  -- after window options is working correctly.
+  local child_test = MiniTest.new_child_neovim()
+  h.child_start(child_test)
+
+  child_test.lua([[
+    -- Create a temporary directory for our test ftplugin
+    local temp_dir = vim.fn.tempname()
+    vim.fn.mkdir(temp_dir .. "/after/ftplugin", "p")
+
+    -- Write a test ftplugin that sets custom window options
+    -- These intentionally differ from plugin defaults to verify override behavior
+    local ftplugin_lines = {
+      "vim.wo.wrap = false",
+      "vim.wo.number = true",
+      "vim.wo.relativenumber = true",
+    }
+    local ftplugin_path = temp_dir .. "/after/ftplugin/codecompanion.lua"
+    vim.fn.writefile(ftplugin_lines, ftplugin_path)
+
+    -- Store paths for cleanup
+    _G.test_temp_dir = temp_dir
+    _G.test_ftplugin_path = ftplugin_path
+
+    h = require('tests.helpers')
+
+    -- Setup codecompanion
+    local codecompanion = h.setup_plugin()
+    codecompanion.setup()
+    codecompanion.chat()
+
+    -- Manually source the ftplugin file to simulate user's after/ftplugin
+    -- This is needed because Neovim won't automatically re-source ftplugin
+    -- files for filetypes that have already been seen in the test environment
+    vim.cmd("source " .. vim.fn.fnameescape(ftplugin_path))
+
+    -- Get the current window options
+    local winnr = vim.api.nvim_get_current_win()
+    local bufnr = vim.api.nvim_win_get_buf(winnr)
+    _G.test_wrap = vim.wo[winnr].wrap
+    _G.test_number = vim.wo[winnr].number
+    _G.test_relativenumber = vim.wo[winnr].relativenumber
+    _G.test_filetype = vim.bo[bufnr].filetype
+  ]])
+
+  -- Retrieve the window option values
+  local wrap = child_test.lua_get([[_G.test_wrap]])
+  local number = child_test.lua_get([[_G.test_number]])
+  local relativenumber = child_test.lua_get([[_G.test_relativenumber]])
+  local filetype = child_test.lua_get([[_G.test_filetype]])
+
+  -- Verify filetype is set correctly
+  h.eq("codecompanion", filetype)
+
+  -- Assert that ftplugin settings override plugin defaults
+  -- Plugin defaults: wrap=true, number=not set, relativenumber=not set
+  -- User ftplugin sets: wrap=false, number=true, relativenumber=true
+  h.eq(false, wrap)
+  h.eq(true, number)
+  h.eq(true, relativenumber)
+
+  child_test.lua([[
+    vim.fn.delete(_G.test_temp_dir, "rf")
+  ]])
+
+  child_test.stop()
+end
+
+T["Chat"]["can create hidden chat without opening window"] = function()
+  local result = child.lua([[
+    local visible_chat = codecompanion.chat({})
+    local last_chat_initial = codecompanion.last_chat()
+
+    local hidden_chat = codecompanion.chat({
+      hidden = true,
+      messages = {
+        { role = "user", content = "Test hidden chat" }
+      }
+    })
+
+    local last_chat_final = codecompanion.last_chat()
+    local line_count = vim.api.nvim_buf_line_count(hidden_chat.bufnr)
+    local cwd_ok, cwd_ctx = pcall(function() return hidden_chat:make_system_prompt_context() end)
+
+    return {
+      visible_id = visible_chat.id,
+      last_initial_id = last_chat_initial.id,
+      hidden_id = hidden_chat.id,
+      last_final_id = last_chat_final.id,
+      hidden = hidden_chat.hidden,
+      bufnr_valid = vim.api.nvim_buf_is_valid(hidden_chat.bufnr),
+      is_visible = hidden_chat.ui:is_visible(),
+      line_count = line_count,
+      buffer_has_content = line_count > 0,
+      cwd_works = cwd_ok,
+      cwd_value = cwd_ok and cwd_ctx.cwd or nil
+    }
+  ]])
+
+  h.eq(true, result.hidden)
+  h.eq(true, result.bufnr_valid)
+  h.eq(false, result.is_visible == true)
+  h.eq(true, result.line_count > 0)
+  h.eq(true, result.cwd_works)
+  h.eq(true, result.cwd_value ~= nil and result.cwd_value ~= "")
+  h.eq(result.visible_id, result.last_initial_id)
+  h.eq(false, result.hidden_id == result.last_final_id)
+  h.eq(result.visible_id, result.last_final_id)
+end
+
+T["Chat"]["on_before_submit callback can prevent submission"] = function()
+  local result = child.lua([[
+    local chat = _G.chat
+    local message_count_before = #chat.messages
+
+    chat:add_callback("on_before_submit", function(c, info)
+      return false
+    end)
+
+    chat:add_buf_message({
+      role = "user",
+      content = "This should not be submitted",
+    })
+    chat:submit()
+
+    return {
+      message_count_before = message_count_before,
+      message_count_after = #chat.messages,
+      no_request = chat.current_request == nil,
+      status = chat.status,
+    }
+  ]])
+
+  -- Messages should be unchanged (no user message added to the stack)
+  h.eq(result.message_count_before, result.message_count_after)
+
+  -- Status is rest
+  h.eq("", result.status)
+end
+
+T["Chat"]["on_before_submit allows submission when not returning false"] = function()
+  local result = child.lua([[
+    local chat = _G.chat
+    local message_count_before = #chat.messages
+
+    chat:add_callback("on_before_submit", function(c, info)
+      -- returning nil
+    end)
+
+    chat:add_buf_message({
+      role = "user",
+      content = "This should be submitted",
+    })
+    chat:submit()
+
+    return {
+      message_count_before = message_count_before,
+      message_count_after = #chat.messages,
+    }
+  ]])
+
+  -- A user message should have been added to the stack
+  h.eq(true, result.message_count_after > result.message_count_before)
+end
+
+T["Chat"]["has_orphaned_tool_calls returns false with no tool calls"] = function()
+  local result = child.lua([[return _G.chat:has_orphaned_tool_calls()]])
+  h.eq(false, result)
+end
+
+T["Chat"]["has_orphaned_tool_calls returns true when a call has no result"] = function()
+  local result = child.lua([[
+    table.insert(_G.chat.messages, {
+      role = "llm",
+      tools = {
+        calls = {
+          { id = "call_1", ["function"] = { name = "read_file", arguments = "{}" } },
+          { id = "call_2", ["function"] = { name = "read_file", arguments = "{}" } },
+        },
+      },
+    })
+
+    -- Only provide a result for call_1
+    table.insert(_G.chat.messages, {
+      role = "tool",
+      content = "file contents",
+      tools = { call_id = "call_1", type = "tool_result" },
+    })
+
+    return _G.chat:has_orphaned_tool_calls()
+  ]])
+
+  h.eq(true, result)
+end
+
+T["Chat"]["has_orphaned_tool_calls returns false when all calls have results"] = function()
+  local result = child.lua([[
+    table.insert(_G.chat.messages, {
+      role = "llm",
+      tools = {
+        calls = {
+          { id = "call_1", ["function"] = { name = "read_file", arguments = "{}" } },
+          { id = "call_2", ["function"] = { name = "read_file", arguments = "{}" } },
+        },
+      },
+    })
+    table.insert(_G.chat.messages, {
+      role = "tool",
+      content = "result 1",
+      tools = { call_id = "call_1", type = "tool_result" },
+    })
+    table.insert(_G.chat.messages, {
+      role = "tool",
+      content = "result 2",
+      tools = { call_id = "call_2", type = "tool_result" },
+    })
+    return _G.chat:has_orphaned_tool_calls()
+  ]])
+  h.eq(false, result)
+end
+
+T["Chat"]["_complete_orphaned_tool_calls synthesizes cancelled results"] = function()
+  local result = child.lua([[
+    table.insert(_G.chat.messages, {
+      role = "llm",
+      tools = {
+        calls = {
+          { id = "call_1", ["function"] = { name = "read_file", arguments = "{}" } },
+          { id = "call_2", ["function"] = { name = "read_file", arguments = "{}" } },
+        },
+      },
+    })
+    -- Provide a result only for call_1
+    table.insert(_G.chat.messages, {
+      role = "tool",
+      content = "result 1",
+      tools = { call_id = "call_1", type = "tool_result" },
+    })
+
+    _G.chat:_complete_orphaned_tool_calls()
+
+    local synthesized
+    for _, msg in ipairs(_G.chat.messages) do
+      if msg.tools and msg.tools.call_id == "call_2" then
+        synthesized = msg
+      end
+    end
+
+    return {
+      has_orphans = _G.chat:has_orphaned_tool_calls(),
+      synthesized_content = synthesized and synthesized.content,
+      synthesized_visible = synthesized and synthesized.opts and synthesized.opts.visible,
+    }
+  ]])
+  h.eq(false, result.has_orphans)
+  h.eq("Cancelled by user", result.synthesized_content)
+  h.eq(false, result.synthesized_visible)
+end
+
+T["Chat"]["done with stopped status completes orphaned tool calls"] = function()
+  local result = child.lua([[
+    table.insert(_G.chat.messages, {
+      role = "llm",
+      tools = {
+        calls = {
+          { id = "call_1", ["function"] = { name = "read_file", arguments = "{}" } },
+        },
+      },
+    })
+    _G.chat.status = "cancelling"
+    _G.chat:done(nil, nil, nil, nil, { status = "stopped" })
+    return _G.chat:has_orphaned_tool_calls()
+  ]])
+  h.eq(false, result)
+end
+
+T["Chat"]["on_before_submit leaves buffer editable after cancellation"] = function()
+  local result = child.lua([[
+    local chat = _G.chat
+
+    chat:add_callback("on_before_submit", function()
+      return false
+    end)
+
+    chat:add_buf_message({
+      role = "user",
+      content = "Test buffer state",
+    })
+    chat:submit()
+
+    return {
+      modifiable = vim.bo[chat.bufnr].modifiable,
+    }
+  ]])
+
+  h.eq(true, result.modifiable)
+end
+
+T["Chat"]["on_tool_output callback receives correct args"] = function()
+  local result = child.lua([[
+    local chat = _G.chat
+    local callback_args = {}
+
+    chat:add_callback("on_tool_output", function(c, args)
+      callback_args = {
+        tool = args.tool,
+        for_llm = args.for_llm,
+        for_user = args.for_user,
+      }
+      args.for_llm = "Modified: " .. args.for_llm
+    end)
+
+    local tool = {
+      name = "weather",
+      function_call = {
+        _index = 0,
+        ["function"] = {
+          arguments = '{"location": "London", "units": "celsius"}',
+          name = "weather",
+        },
+        id = "call_RJU6xfk0OzQF3Gg9cOFS5RY7",
+        type = "function",
+      },
+    }
+    chat:add_tool_output(tool, "LLM output", "User output")
+
+    return {
+      callback_args = callback_args,
+      message_content = chat.messages[#chat.messages].content,
+    }
+  ]])
+
+  h.eq(result.callback_args.tool, "weather")
+  h.eq(result.callback_args.for_llm, "LLM output")
+  h.eq(result.callback_args.for_user, "User output")
+  h.eq(result.message_content, "Modified: LLM output")
+end
+
+T["Chat"]["btw"] = new_set()
+
+T["Chat"]["btw"]["stores the message on the chat object"] = function()
+  child.lua([[
+    chat:btw("look in src/utils instead")
+  ]])
+
+  local queued = child.lua_get([[chat._btw]])
+  h.eq("look in src/utils instead", queued)
+end
+
+T["Chat"]["btw"]["ignores empty input"] = function()
+  child.lua([[
+    chat:btw("")
+    chat:btw(nil)
+  ]])
+
+  local queued = child.lua_get([[chat._btw]])
+  h.eq(vim.NIL, queued)
+end
+
+T["Chat"]["btw"]["last message wins when queued multiple times"] = function()
+  child.lua([[
+    chat:btw("first")
+    chat:btw("second")
+  ]])
+
+  local queued = child.lua_get([[chat._btw]])
+  h.eq("second", queued)
+end
+
+T["Chat"]["inject"] = new_set()
+
+T["Chat"]["inject"]["injects the queued message into the message stack on auto-submit"] = function()
+  child.lua([[
+    chat:btw("check the tests directory")
+
+    -- Simulate the auto-submit path which calls _inject_btw
+    chat:_inject_btw()
+  ]])
+
+  -- The queued message should now be in the message stack
+  local result = child.lua([[
+    local last = chat.messages[#chat.messages]
+    return { role = last.role, content = last.content, queued = chat._btw }
+  ]])
+
+  h.eq("user", result.role)
+  h.eq("check the tests directory", result.content)
+  -- And cleared from the queue
+  h.eq(true, result.queued == vim.NIL or result.queued == nil)
+end
+
+T["Chat"]["inject"]["does nothing when the queue is empty"] = function()
+  local count_before = child.lua_get([[#chat.messages]])
+
+  child.lua([[chat:_inject_btw()]])
+
+  local count_after = child.lua_get([[#chat.messages]])
+  h.eq(count_before, count_after)
+end
+
+T["Chat"]["inject"]["is injected after tool results in auto-submit flow"] = function()
+  child.lua([[
+    -- Simulate the state after tools have run: tool call + tool result in messages
+    chat:add_message({
+      role = "llm",
+      content = "",
+    }, {
+      visible = false,
+    })
+
+    -- Simulate a tool result
+    chat:add_message({
+      role = "user",
+      content = "Tool result: file contents here",
+    }, { visible = false })
+
+    -- Now queue a user message
+    chat:btw("focus on the error handling")
+
+    -- Trigger inject (as auto-submit path would)
+    chat:_inject_btw()
+  ]])
+
+  local result = child.lua([[
+    local msgs = chat.messages
+    local last = msgs[#msgs]
+    local second_last = msgs[#msgs - 1]
+    return {
+      last_role = last.role,
+      last_content = last.content,
+      second_last_content = second_last.content,
+    }
+  ]])
+
+  -- The queued message should come after the tool result
+  h.eq("user", result.last_role)
+  h.eq("focus on the error handling", result.last_content)
+  h.eq("Tool result: file contents here", result.second_last_content)
+end
+
+return T

@@ -1,0 +1,52 @@
+```{.include}
+doc/index.md
+doc/installation.md
+doc/getting-started.md
+doc/architecture.md
+doc/agent-client-protocol.md
+doc/model-context-protocol.md
+```
+
+# Configuration
+```{.include shift-heading-level-by=1}
+doc/configuration/upgrading.md
+doc/configuration/action-palette.md
+doc/configuration/adapters-acp.md
+doc/configuration/adapters-http.md
+doc/configuration/chat-buffer.md
+doc/configuration/cli.md
+doc/configuration/inline.md
+doc/configuration/mcp.md
+doc/configuration/rules.md
+doc/configuration/prompt-library.md
+doc/configuration/system-prompt.md
+doc/configuration/extensions.md
+doc/configuration/others.md
+```
+
+# Usage
+```{.include shift-heading-level-by=1}
+doc/usage/introduction.md
+doc/usage/action-palette.md
+doc/usage/chat-buffer/index.md
+doc/usage/chat-buffer/agents-tools.md
+doc/usage/chat-buffer/editor-context.md
+doc/usage/chat-buffer/rules.md
+doc/usage/chat-buffer/slash-commands.md
+doc/usage/cli.md
+doc/usage/events.md
+doc/usage/inline.md
+doc/usage/prompt-library.md
+doc/usage/ui.md
+doc/usage/workflows.md
+```
+
+# Extending
+```{.include shift-heading-level-by=1}
+doc/extending/adapters.md
+doc/extending/agentic-workflows.md
+doc/extending/extensions.md
+doc/extending/parsers.md
+doc/extending/tools.md
+doc/extending/ui.md
+```
