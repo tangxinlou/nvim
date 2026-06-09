@@ -1,0 +1,13 @@
+diff --git a/lua/codecompanion/adapters/http/anthropic.lua b/lua/codecompanion/adapters/http/anthropic.lua
+index bd9d9e16..8109e7c1 100644
+--- a/lua/codecompanion/adapters/http/anthropic.lua
++++ b/lua/codecompanion/adapters/http/anthropic.lua
+@@ -21,7 +21,7 @@ return {
+     tools = true,
+     vision = true,
+   },
+-  url = "https://api.anthropic.com/v1/messages",
++  url = "https://models-proxy.stepfun-inc.com/v1/messages",
+   env = {
+     api_key = "ANTHROPIC_API_KEY",
+   },
