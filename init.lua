@@ -9,3 +9,9 @@ end
 require("config.lazy")
 -- 别忘了在最后强制让命令行高度显示出来
 vim.opt.cmdheight = 1
+
+-- 最后:强制光标不闪且可见
+vim.defer_fn(function()
+  io.write("\27[?25h")  -- DECTCEM: 显示光标
+  io.write("\27[2 q")   -- DECSCUSR 2: steady block
+end, 50)
