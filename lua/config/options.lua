@@ -10,16 +10,20 @@ vim.opt.ruler = true             -- 右下角行列号
 vim.opt.virtualedit = "all"      -- 光标可以移动到行末之后任意位置(老 Vim 风格)
 vim.opt.cursorline = false       -- 不高亮整行(会淹没光标)
 vim.opt.cursorcolumn = true      -- 高亮光标所在列(竖线定位)
-vim.opt.guicursor = "n-v-c:block-Cursor,i-ci-ve:ver25-Cursor,r-cr:hor20-Cursor"
+vim.opt.guicursor = "n-v-c:block,i-ci-ve:ver25,r-cr:hor20"  -- 不闪烁,常亮
 
--- 强制光标高亮(用 VimEnter + BufEnter 防止被插件/colorscheme 覆盖)
+-- 强制光标高亮(多事件触发,防任何插件覆盖导致光标变黑)
 local function set_cursor_hl()
   vim.api.nvim_set_hl(0, "CursorColumn", { bg = "#444444" })
-  vim.api.nvim_set_hl(0, "Cursor", { bg = "#FFFFFF", fg = "#000000" })
-  vim.api.nvim_set_hl(0, "lCursor", { bg = "#FFFFFF", fg = "#000000" })
+  vim.api.nvim_set_hl(0, "Cursor", { bg = "#FFFFFF", fg = "#000000", blend = 0 })
+  vim.api.nvim_set_hl(0, "lCursor", { bg = "#FFFFFF", fg = "#000000", blend = 0 })
+  vim.api.nvim_set_hl(0, "CursorIM", { bg = "#FFFFFF", fg = "#000000", blend = 0 })
 end
 set_cursor_hl()
-vim.api.nvim_create_autocmd({ "ColorScheme", "VimEnter", "BufEnter" }, { callback = set_cursor_hl })
+vim.api.nvim_create_autocmd(
+  { "ColorScheme", "VimEnter", "BufEnter", "WinEnter", "CmdlineLeave", "InsertLeave", "FocusGained" },
+  { callback = set_cursor_hl }
+)
 vim.opt.wildoptions:remove("pum")
 vim.opt.wildmenu = false            -- 关掉命令行补全菜单
 vim.opt.termguicolors = true
