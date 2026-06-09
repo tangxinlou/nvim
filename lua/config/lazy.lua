@@ -19,10 +19,8 @@ require("lazy").setup({
     -- add LazyVim and import its plugins
     { "LazyVim/LazyVim", import = "lazyvim.plugins" },
     -- import/override with your plugins
-    { "folke/noice.nvim", enabled = false },   -- 禁用悬浮命令行
-    { "rcarriga/nvim-notify", enabled = false }, -- 禁用通知气泡
-    { "nvim-lualine/lualine.nvim", enabled = false }, --禁用lzay 地步line status 显示
-    { "akinsho/bufferline.nvim", enabled = false }, --禁用tab栏
+    { "folke/noice.nvim", enabled = false },   -- 禁用悬浮命令行,命令走底部(老 Vim 风格)
+    { "akinsho/bufferline.nvim", enabled = false }, -- 禁用 buffer 伪标签,用真 tab
     { import = "plugins" },
   },
   defaults = {
@@ -34,7 +32,7 @@ require("lazy").setup({
     version = false, -- always use the latest git commit
     -- version = "*", -- try installing the latest stable version for plugins that support semver
   },
-  install = { colorscheme = { "tokyonight", "habamax" } },
+  install = { colorscheme = { "elflord" } },
   checker = {
     enabled = true, -- check for plugin updates periodically
     notify = false, -- notify on update
