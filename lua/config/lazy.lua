@@ -19,6 +19,10 @@ require("lazy").setup({
     -- add LazyVim and import its plugins
     { "LazyVim/LazyVim", import = "lazyvim.plugins" },
     -- import/override with your plugins
+    { "folke/noice.nvim", enabled = false },   -- 禁用悬浮命令行
+    { "rcarriga/nvim-notify", enabled = false }, -- 禁用通知气泡
+    { "nvim-lualine/lualine.nvim", enabled = false }, --禁用lzay 地步line status 显示
+    { "akinsho/bufferline.nvim", enabled = false }, --禁用tab栏
     { import = "plugins" },
   },
   defaults = {
