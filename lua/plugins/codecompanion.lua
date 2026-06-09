@@ -7,7 +7,7 @@ return {
   config = function()
     require("codecompanion").setup({
       opts = {
-        language = "Chinese",  -- AI 用中文回复
+        language = "Chinese",
       },
       adapters = {
         anthropic = function()
@@ -22,7 +22,24 @@ return {
         end,
       },
       strategies = {
-        chat = { adapter = "anthropic" },
+        chat = {
+          adapter = "anthropic",
+          tools = {
+            ["read_file"] = { opts = { require_approval_before = false } },
+            ["file_search"] = { opts = { require_approval_before = false } },
+            ["grep_search"] = { opts = { require_approval_before = false } },
+            ["get_changed_files"] = { opts = { require_approval_before = false } },
+            ["get_diagnostics"] = { opts = { require_approval_before = false } },
+            ["create_file"] = { opts = { require_approval_before = false } },
+            ["insert_edit_into_file"] = { opts = { require_approval_before = false, require_confirmation_after = false } },
+            ["run_command"] = { opts = { require_approval_before = false, require_cmd_approval = false } },
+            -- 只有删除文件保留审批
+            ["delete_file"] = { opts = { require_approval_before = true } },
+            opts = {
+              default_tools = { "agent" },
+            },
+          },
+        },
         inline = { adapter = "anthropic" },
         agent = { adapter = "anthropic" },
       },
@@ -36,7 +53,7 @@ return {
     })
   end,
   keys = {
-    { ",cc", "<Cmd>CodeCompanionChat<CR>", desc = "AI Chat" },
+    { ",cc", "<Cmd>CodeCompanionChat<CR>", desc = "AI Agent Chat" },
     { ",ca", "<Cmd>CodeCompanionActions<CR>", desc = "AI Actions" },
   },
 }
